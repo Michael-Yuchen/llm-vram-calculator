@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM 训练显存计算器 (3D Parallelism Edition)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@2.1.0"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; }
+        .input-group label { font-size: 0.8rem; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center; }
+        .input-group input, .input-group select { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border-radius: 0.375rem; border: 1px solid #cbd5e1; font-size: 0.9rem; transition: border-color 0.2s; }
+        .input-group input:focus, .input-group select:focus { border-color: #3b82f6; outline: none; ring: 2px solid #bfdbfe; }
+        .result-card { transition: all 0.3s ease; }
+        .info-icon { cursor: help; color: #94a3b8; margin-left: 4px; }
+        .tooltip { visibility: hidden; position: absolute; background-color: #333; color: #fff; padding: 5px; border-radius: 4px; font-size: 0.75rem; z-index: 50; width: 220px; opacity: 0; transition: opacity 0.2s; white-space: normal; line-height: 1.4; pointer-events: none; }
+        .info-icon:hover + .tooltip { visibility: visible; opacity: 1; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 5px; }
+        .tooltip-container { position: relative; display: inline-block; }
+        
+        /* Modal Styles */
+        .modal { display: none; position: fixed; z-index: 100; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); backdrop-filter: blur(4px); }
+        .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 90%; max-width: 800px; border-radius: 12px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); animation: slideDown 0.3s ease-out; }
+        @keyframes slideDown { from { transform: translateY(-50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .step-box { background: #f8fafc; border-left: 4px solid #3b82f6; padding: 12px; margin-bottom: 12px; border-radius: 0 8px 8px 0; }
+        .formula { font-family: 'Courier New', Courier, monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-weight: bold; color: #1e293b; }
+        .var-highlight { color: #2563eb; font-weight: bold; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+
+<div class="max-w-7xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden grid grid-cols-1 lg:grid-cols-12">
+    
+    <!-- Header -->
+    <div class="lg:col-span-12 bg-slate-900 text-white p-6 border-b border-slate-800 flex justify-between items-center">
+        <div>
+            <h1 class="text-2xl font-bold flex items-center gap-2">
+                🧮 LLM 显存计算器 <span class="text-xs bg-purple-600 px-2 py-1 rounded text-white font-mono">3D Parallel</span>
+            </h1>
+            <p class="text-slate-400 text-sm mt-1">支持 TP(张量) / PP(流水线) / DP(数据) / SP(序列) 混合并行计算</p>
+        </div>
+        <div class="hidden md:block text-right">
+            <div class="text-xs text-slate-500">v3.7 Strict Mode</div>
+        </div>
+    </div>
+
+    <!-- 左侧：控制面板 -->
+    <div class="lg:col-span-4 bg-slate-50 p-6 space-y-5 overflow-y-auto max-h-[100vh]">
+        
+        <!-- 1. 模型参数区域 -->
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+            <h3 class="text-sm font-bold text-slate-900 mb-3 flex items-center">
+                <span class="w-1 h-4 bg-blue-500 mr-2 rounded"></span>模型规格 (Model Specs)
+            </h3>
+            
+            <div class="mb-3">
+                <select id="modelPreset" onchange="applyPreset()" class="w-full text-sm bg-slate-50 border-slate-300 rounded-md py-2 font-medium text-slate-700">
+                    <option value="custom">-- 自定义模型 --</option>
+                    <optgroup label="Dense Models">
+                        <option value="qwen2_72b">Qwen2-72B (Dense)</option>
+                        <option value="llama3_8b">Llama-3-8B (Dense)</option>
+                        <option value="llama3_70b">Llama-3-70B (Dense)</option>
+                        <option value="llama3_405b">Llama-3-405B (Dense)</option>
+                    </optgroup>
+                    <optgroup label="MoE Models">
+                        <option value="qwen_moe_a27b">Qwen1.5-MoE (A2.7B)</option>
+                        <option value="mixtral_8x7b">Mixtral 8x7B (A13B)</option>
+                        <option value="deepseek_v3">DeepSeek-V3 (Total 671B / Active 37B)</option>
+                        <option value="qwen_next_80b">Qwen3-Next (Total 80B / Active 3B)</option>
+                    </optgroup>
+                </select>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div class="input-group">
+                    <label class="tooltip-container">Total Params (B) <span class="info-icon">?</span><div class="tooltip">模型总参数量。影响权重存储。</div></label>
+                    <input type="number" id="totalParams" step="0.1" value="72" oninput="syncActiveParams(false)">
+                </div>
+                <div class="input-group">
+                    <label class="tooltip-container text-blue-600">Active Params (B) <span class="info-icon">?</span><div class="tooltip">单次前向传播激活的参数量。MoE 模型通常远小于总参数。Dense 模型二者相等。</div></label>
+                    <input type="number" id="activeParams" step="0.1" value="72" class="border-blue-200 bg-blue-50">
+                </div>
+                <div class="input-group">
+                    <label>Hidden Size (H)</label>
+                    <input type="number" id="hiddenSize" value="8192">
+                </div>
+                <div class="input-group">
+                    <label>Layers (L)</label>
+                    <input type="number" id="layers" value="80">
+                </div>
+            </div>
+            
+            <!-- MoE 开关与系数 -->
+            <div class="mt-3 flex items-center justify-between bg-slate-50 p-2 rounded border border-slate-100">
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="isMoE" class="rounded text-blue-600 focus:ring-blue-500 h-4 w-4" onchange="toggleMoEMode()">
+                    <label for="isMoE" class="cursor-pointer select-none text-xs font-bold text-slate-700">这是 MoE 模型</label>
+                </div>
+                <div id="moeConfig" class="flex items-center gap-2 opacity-50 pointer-events-none transition-opacity">
+                    <label class="text-xs text-slate-500 font-medium whitespace-nowrap tooltip-container">激活系数(Factor) <span class="info-icon">?</span><div class="tooltip">MoE 特有的激活膨胀系数。包含 Router logits, Dispatch Mask, Padding (Capacity Factor) 等开销。稳健建议 1.3。</div></label>
+                    <input type="number" id="moeFactor" step="0.1" value="1.3" class="w-16 text-xs p-1 border rounded bg-white text-center" oninput="calculate()">
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. 3D 并行策略 -->
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200 ring-1 ring-purple-100">
+            <h3 class="text-sm font-bold text-slate-900 mb-3 flex items-center justify-between">
+                <div class="flex items-center"><span class="w-1 h-4 bg-purple-500 mr-2 rounded"></span>3D 并行策略</div>
+                <span id="dpSizeDisplay" class="text-xs font-mono bg-purple-100 text-purple-700 px-2 py-1 rounded">DP=8</span>
+            </h3>
+            
+            <div class="grid grid-cols-2 gap-3 mb-3">
+                <div class="input-group">
+                    <label class="tooltip-container">GPU 总数 (N) <span class="info-icon">?</span><div class="tooltip">集群中的总 GPU 数量 (World Size)。</div></label>
+                    <input type="number" id="gpuCount" value="8" oninput="updateDP()">
+                </div>
+                <!-- VRAM Input (Customizable) -->
+                <div class="input-group">
+                    <label class="tooltip-container">单卡显存 (GB) <span class="info-icon">?</span><div class="tooltip">输入单张显卡的显存大小。可通过右侧下拉快速选择常见规格。</div></label>
+                    <div class="flex gap-1">
+                        <input type="number" id="gpuVram" value="80" oninput="calculate()" class="flex-grow !w-full" placeholder="输入值">
+                        <select onchange="document.getElementById('gpuVram').value=this.value; calculate();" class="!w-12 text-center bg-gray-100 text-gray-500 !p-0" title="快速选择预设">
+                            <option value="" disabled selected>▼</option>
+                            <option value="24">24 GB (4090)</option>
+                            <option value="32">32 GB (V100)</option>
+                            <option value="40">40 GB (A100)</option>
+                            <option value="48">48 GB (A6000)</option>
+                            <option value="80">80 GB (A100/H800)</option>
+                            <option value="96">96 GB (A100x)</option>
+                            <option value="141">141 GB (H200)</option>
+                            <option value="192">192 GB (H200x)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 pb-3 border-b border-slate-100">
+                <div class="input-group">
+                    <label class="tooltip-container text-purple-700">TP Size (张量) <span class="info-icon">?</span><div class="tooltip">Tensor Parallel. 切分单层矩阵。降低单卡权重和激活显存。需要高带宽(NVLink)。</div></label>
+                    <input type="number" id="tpSize" value="1" min="1" oninput="updateDP()">
+                </div>
+                <div class="input-group">
+                    <label class="tooltip-container text-purple-700">PP Size (流水线) <span class="info-icon">?</span><div class="tooltip">Pipeline Parallel. 切分层数。降低单卡权重，但增加 Activation Bubble。</div></label>
+                    <input type="number" id="ppSize" value="1" min="1" oninput="updateDP()">
+                </div>
+            </div>
+
+            <div class="pt-3 space-y-3">
+                <div class="input-group">
+                    <label class="tooltip-container text-slate-800">精度模式 (Bytes/Param) <span class="info-icon">?</span><div class="tooltip">16 Bytes: 标准混合精度 (FP16权重+FP32备份+FP32优化器)<br>12 Bytes: 优化模式 (FP16权重+FP32优化器，无Master Weights)</div></label>
+                    <select id="precisionMode" class="font-medium bg-slate-50" onchange="calculate()">
+                        <option value="16" selected>16 Bytes (标准 Mixed Precision)</option>
+                        <option value="12">12 Bytes (激进 Pure BF16 / Optimized)</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <label class="tooltip-container">ZeRO 优化等级 (DP) <span class="info-icon">?</span><div class="tooltip">作用于 DP 组内。<br>ZeRO-3: 全切分 (最省显存)<br>ZeRO-2: 切梯度+优化器<br>DDP: 不切分</div></label>
+                    <select id="zeroStage" class="font-medium bg-slate-50">
+                        <option value="3" selected>DeepSpeed ZeRO-3 (Fully Sharded)</option>
+                        <option value="2">DeepSpeed ZeRO-2 (Grad+Opt Sharded)</option>
+                        <option value="0">DDP / No ZeRO (Replicated)</option>
+                    </select>
+                </div>
+                <div class="flex items-center justify-between text-sm">
+                    <label class="tooltip-container flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="useSP" class="w-4 h-4 text-purple-600 rounded">
+                        <span class="text-slate-700 font-medium">启用 SP (序列并行)</span>
+                        <span class="info-icon">?</span><div class="tooltip">Sequence Parallelism. 将激活值沿序列维度切分到 TP 组内。显著降低长文本显存。</div>
+                    </label>
+                </div>
+            </div>
+            <div id="parallelError" class="hidden mt-2 text-xs text-red-600 bg-red-50 p-2 rounded border border-red-200">
+                配置错误: TP * PP > GPU总数!
+            </div>
+        </div>
+
+        <!-- 3. 训练超参 -->
+        <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+            <h3 class="text-sm font-bold text-slate-900 mb-3 flex items-center">
+                <span class="w-1 h-4 bg-green-500 mr-2 rounded"></span>训练超参 (Hyperparams)
+            </h3>
+            <div class="grid grid-cols-2 gap-3">
+                <div class="input-group col-span-2">
+                    <label>Sequence Length (Seq)</label>
+                    <select id="seqLen">
+                        <option value="2048">2k</option>
+                        <option value="4096">4k</option>
+                        <option value="8192">8k</option>
+                        <option value="16384">16k</option>
+                        <option value="32768" selected>32k</option>
+                        <option value="65536">64k</option>
+                        <option value="131072">128k</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label class="tooltip-container">Micro Batch <span class="info-icon">?</span><div class="tooltip">单次迭代的数据量。PP开启时，通常 Pipeline Depth = PP Size，此处指单步 MB。</div></label>
+                    <input type="number" id="microBatch" value="1">
+                </div>
+                <div class="input-group">
+                    <label>Checkpointing</label>
+                    <select id="checkpointing">
+                        <option value="true" selected>开启 (Standard)</option>
+                        <option value="false">关闭 (Off)</option>
+                        <option value="selective">Selective</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <button onclick="calculate()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-3 px-4 rounded-lg shadow-lg transition transform active:scale-95">
+            计算显存占用 (Calculate)
+        </button>
+    </div>
+
+    <!-- 右侧：结果展示 -->
+    <div class="lg:col-span-8 p-6 bg-slate-50 flex flex-col h-full relative">
+        
+        <!-- 核心仪表盘 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <!-- 卡片1: 模型权重 -->
+            <div class="bg-white p-5 rounded-xl border-l-4 border-blue-500 shadow-sm relative group">
+                <div class="text-xs text-blue-500 font-bold uppercase tracking-wider mb-1">Model States</div>
+                <div class="text-3xl font-black text-slate-800" id="resModel">0 <span class="text-sm font-medium text-slate-400">GB</span></div>
+                <div class="text-xs text-slate-500 mt-2 flex justify-between">
+                    <span>Weights+Grads</span>
+                    <span id="shardInfo" class="text-blue-400"></span>
+                </div>
+            </div>
+
+            <!-- 卡片2: 激活 -->
+            <div class="bg-white p-5 rounded-xl border-l-4 border-purple-500 shadow-sm relative group">
+                <div class="text-xs text-purple-500 font-bold uppercase tracking-wider mb-1">Activations</div>
+                <div class="text-3xl font-black text-slate-800" id="resAct">0 <span class="text-sm font-medium text-slate-400">GB</span></div>
+                <div class="text-xs text-slate-500 mt-2 flex justify-between">
+                    <span>Seq & Batch</span>
+                    <span id="actInfo" class="text-purple-400"></span>
+                </div>
+            </div>
+
+            <!-- 卡片3: 总计 -->
+            <div class="bg-white p-5 rounded-xl border-l-4 border-slate-700 shadow-sm relative group">
+                <div class="text-xs text-slate-600 font-bold uppercase tracking-wider mb-1">Total VRAM / Card</div>
+                <div class="text-3xl font-black text-slate-900" id="resTotal">0 <span class="text-sm font-medium text-slate-400">GB</span></div>
+                <div id="resStatus" class="inline-block mt-2 px-2 py-0.5 rounded text-xs font-bold bg-gray-200 text-gray-600">waiting...</div>
+            </div>
+        </div>
+
+        <!-- 可视化图表 -->
+        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex-grow min-h-[300px] mb-4">
+            <canvas id="memoryChart"></canvas>
+        </div>
+
+        <!-- 详细分析文本 -->
+        <div class="bg-indigo-50 border border-indigo-100 p-4 rounded-xl relative">
+            <div class="flex justify-between items-start mb-2">
+                <h4 class="font-bold text-indigo-900 text-sm flex items-center">
+                    <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                    3D 并行分析报告 (Analysis)
+                </h4>
+                <button onclick="showDetails()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-3 py-1.5 rounded-full font-medium transition flex items-center gap-1 shadow-sm">
+                    <span>📜 显示详细计算过程</span>
+                </button>
+            </div>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs md:text-sm text-indigo-800">
+                <div id="analysisTextLeft">
+                    请点击计算...
+                </div>
+                <div id="analysisTextRight">
+                    
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal 弹窗 -->
+<div id="detailModal" class="modal">
+    <div class="modal-content relative">
+        <span onclick="closeDetails()" class="absolute top-4 right-4 text-gray-400 hover:text-gray-600 cursor-pointer text-2xl font-bold">&times;</span>
+        <h2 class="text-xl font-bold mb-4 text-slate-800 border-b pb-2">🧮 详细计算过程推导</h2>
+        <div id="modalBody" class="text-sm text-slate-700 space-y-4">
+            <!-- Content injected by JS -->
+        </div>
+        <div class="mt-6 text-right">
+            <button onclick="closeDetails()" class="bg-slate-800 text-white px-4 py-2 rounded hover:bg-slate-700 transition">关闭</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    const presets = {
+        "qwen2_72b": { total: 72, active: 72, hidden: 8192, layers: 80, isMoE: false, moeFactor: 1.0 },
+        "llama3_8b": { total: 8, active: 8, hidden: 4096, layers: 32, isMoE: false, moeFactor: 1.0 },
+        "llama3_70b": { total: 70, active: 70, hidden: 8192, layers: 80, isMoE: false, moeFactor: 1.0 },
+        "llama3_405b": { total: 405, active: 405, hidden: 16384, layers: 126, isMoE: false, moeFactor: 1.0 },
+        "qwen_moe_a27b": { total: 14.3, active: 2.7, hidden: 2048, layers: 24, isMoE: true, moeFactor: 1.3 },
+        "mixtral_8x7b": { total: 47, active: 13, hidden: 4096, layers: 32, isMoE: true, moeFactor: 1.3 },
+        "deepseek_v3": { total: 671, active: 37, hidden: 7168, layers: 61, isMoE: true, moeFactor: 1.3 },
+        "qwen_next_80b": { total: 80, active: 3, hidden: 2048, layers: 48, isMoE: true, moeFactor: 1.3 }
+    };
+
+    let chartInstance = null;
+    let detailLog = ""; // 存储详细日志 HTML
+
+    function applyPreset() {
+        const val = document.getElementById('modelPreset').value;
+        if (presets[val]) {
+            const p = presets[val];
+            document.getElementById('totalParams').value = p.total;
+            document.getElementById('activeParams').value = p.active;
+            document.getElementById('hiddenSize').value = p.hidden;
+            document.getElementById('layers').value = p.layers;
+            document.getElementById('isMoE').checked = p.isMoE;
+            
+            // Apply MoE Factor Logic:
+            // 1. If preset defines it (even 1.0), use it.
+            // 2. If not defined: if isMoE, use 1.3; if Dense, use 1.0.
+            if (p.moeFactor !== undefined) {
+                document.getElementById('moeFactor').value = p.moeFactor;
+            } else {
+                document.getElementById('moeFactor').value = p.isMoE ? 1.3 : 1.0;
+            }
+
+            toggleMoEMode();
+            
+            if (p.total > 100) {
+                document.getElementById('tpSize').value = 4;
+                document.getElementById('ppSize').value = 1;
+            } else {
+                document.getElementById('tpSize').value = 1;
+                document.getElementById('ppSize').value = 1;
+            }
+            updateDP();
+            calculate();
+        }
+    }
+
+    function toggleMoEMode() {
+        const isMoE = document.getElementById('isMoE').checked;
+        const activeInput = document.getElementById('activeParams');
+        const totalInput = document.getElementById('totalParams');
+        const moeConfig = document.getElementById('moeConfig');
+
+        if (!isMoE) {
+            activeInput.value = totalInput.value;
+            activeInput.disabled = true;
+            activeInput.classList.add('bg-gray-100', 'text-gray-500');
+            activeInput.classList.remove('bg-blue-50');
+            // Hide/Disable MoE Config
+            moeConfig.classList.add('opacity-50', 'pointer-events-none');
+        } else {
+            activeInput.disabled = false;
+            activeInput.classList.remove('bg-gray-100', 'text-gray-500');
+            activeInput.classList.add('bg-blue-50');
+            // Show MoE Config
+            moeConfig.classList.remove('opacity-50', 'pointer-events-none');
+        }
+    }
+
+    function syncActiveParams(force) {
+        if (!document.getElementById('isMoE').checked) {
+            document.getElementById('activeParams').value = document.getElementById('totalParams').value;
+        }
+    }
+
+    function updateDP() {
+        const gpuCount = parseInt(document.getElementById('gpuCount').value);
+        const tp = parseInt(document.getElementById('tpSize').value);
+        const pp = parseInt(document.getElementById('ppSize').value);
+        const errDiv = document.getElementById('parallelError');
+
+        if (tp * pp > gpuCount) {
+            errDiv.classList.remove('hidden');
+            document.getElementById('dpSizeDisplay').innerText = "Error";
+            return 0;
+        } else {
+            errDiv.classList.add('hidden');
+            const dp = Math.floor(gpuCount / (tp * pp));
+            document.getElementById('dpSizeDisplay').innerText = `DP=${dp}`;
+            return dp;
+        }
+    }
+
+    // Modal Control
+    function showDetails() {
+        if (!detailLog) {
+            calculate(); // Ensure log exists
+        }
+        document.getElementById('modalBody').innerHTML = detailLog;
+        document.getElementById('detailModal').style.display = 'block';
+    }
+    
+    function closeDetails() {
+        document.getElementById('detailModal').style.display = 'none';
+    }
+
+    window.onclick = function(event) {
+        if (event.target == document.getElementById('detailModal')) {
+            closeDetails();
+        }
+    }
+
+    function calculate() {
+        const totalParams = parseFloat(document.getElementById('totalParams').value) * 1e9;
+        const hiddenSize = parseInt(document.getElementById('hiddenSize').value);
+        const layers = parseInt(document.getElementById('layers').value);
+        const seqLen = parseInt(document.getElementById('seqLen').value);
+        const microBatch = parseInt(document.getElementById('microBatch').value);
+        const gpuCount = parseInt(document.getElementById('gpuCount').value);
+        const gpuVram = parseInt(document.getElementById('gpuVram').value);
+        
+        const precisionMode = parseInt(document.getElementById('precisionMode').value); // 16 or 12
+        const zeroStage = parseInt(document.getElementById('zeroStage').value);
+        const checkpointing = document.getElementById('checkpointing').value;
+        const isMoE = document.getElementById('isMoE').checked;
+        const tp = parseInt(document.getElementById('tpSize').value);
+        const pp = parseInt(document.getElementById('ppSize').value);
+        const useSP = document.getElementById('useSP').checked;
+        
+        // MoE Factor
+        let moeFactor = 1.0;
+        if (isMoE) {
+            moeFactor = parseFloat(document.getElementById('moeFactor').value) || 1.0;
+        }
+
+        let dp = updateDP();
+        if (dp === 0) dp = 1;
+
+        // --- PART 1: Model States ---
+        let modelBytes = 0;
+        let shardInfoText = "";
+        const physicalModelParams = totalParams / (tp * pp);
+        
+        // Constants dependent on Precision Mode
+        const bytesW = 2; // Weights are always ~2 bytes (BF16/FP16)
+        const bytesG = 2; // Grads are always ~2 bytes
+        const bytesO = precisionMode - 4; // 16->12, 12->8. 
+        
+        // Log generation start
+        detailLog = "";
+        
+        detailLog += `<div class="step-box">
+            <h3 class="font-bold text-blue-700 mb-2">1. Model States (模型静态显存)</h3>
+            <p>模型总参数: <span class="var-highlight">${(totalParams/1e9).toFixed(1)}B</span></p>
+            <p>精度模式: <span class="var-highlight">${precisionMode} Bytes/Param</span> 
+               <span class="text-xs text-gray-500">(${precisionMode===16 ? '含 FP32 Master Weights' : '不含 FP32 Master Weights'})</span></p>
+            <div class="formula mt-1">单卡物理参数 = Total / (TP × PP) = ${(physicalModelParams/1e9).toFixed(2)}B</div>
+        `;
+
+        if (zeroStage === 3) {
+            // ZeRO-3
+            modelBytes = (physicalModelParams * precisionMode) / dp;
+            shardInfoText = `Global Shard / ${gpuCount}`;
+            detailLog += `
+                <p class="mt-2">ZeRO-3 (Fully Sharded) 策略:</p>
+                <ul class="list-disc pl-5 text-gray-600">
+                    <li>参数+梯度+优化器 (总计 ${precisionMode} Bytes) 在 DP 组 (${dp} 卡) 内再次均分。</li>
+                </ul>
+                <div class="formula mt-1">显存 = (单卡物理参数 × ${precisionMode}) / DP = ${(modelBytes/1e9).toFixed(2)} GB</div>
+            `;
+        } else if (zeroStage === 2) {
+            // ZeRO-2
+            const shardedBytesPerParam = bytesG + bytesO;
+            const wBytes = physicalModelParams * bytesW;
+            const goBytes = (physicalModelParams * shardedBytesPerParam) / dp;
+            
+            modelBytes = wBytes + goBytes;
+            shardInfoText = `W(TP${tp}*PP${pp}) + Opt(DP${dp})`;
+            detailLog += `
+                <p class="mt-2">ZeRO-2 (Grad+Opt Sharded) 策略:</p>
+                <ul class="list-disc pl-5 text-gray-600">
+                    <li>权重 (${bytesW} Bytes): <b>不切分</b> (每张卡保留完整物理分块)</li>
+                    <li>梯度+优化器 (${shardedBytesPerParam} Bytes): <b>切分</b> (在 DP 组内均分)</li>
+                </ul>
+                <div class="formula mt-1">权重 = ${(wBytes/1e9).toFixed(2)} GB</div>
+                <div class="formula">优化器状态 = (单卡物理参数 × ${shardedBytesPerParam}) / DP = ${(goBytes/1e9).toFixed(2)} GB</div>
+                <div class="formula border-t border-gray-300 mt-1 pt-1">合计 = ${(modelBytes/1e9).toFixed(2)} GB</div>
+            `;
+        } else {
+            // DDP
+            modelBytes = physicalModelParams * precisionMode;
+            shardInfoText = `Replicated in DP`;
+            detailLog += `
+                <p class="mt-2">DDP (No ZeRO) 策略:</p>
+                <ul class="list-disc pl-5 text-gray-600">
+                    <li>不进行任何显存分摊优化。</li>
+                </ul>
+                <div class="formula mt-1">显存 = 单卡物理参数 × ${precisionMode} = ${(modelBytes/1e9).toFixed(2)} GB</div>
+            `;
+        }
+        detailLog += `</div>`;
+
+        // --- PART 2: Activations ---
+        let actBytesBase = layers * seqLen * microBatch * hiddenSize * 2;
+        let checkpointFactor = (checkpointing === 'true') ? 1.0 : (checkpointing === 'selective' ? 4 : 15);
+        
+        // Include MoE Factor in the logic
+        let finalActBytes = actBytesBase * checkpointFactor * moeFactor;
+
+        detailLog += `<div class="step-box border-l-4 border-purple-500">
+            <h3 class="font-bold text-purple-700 mb-2">2. Activations (激活显存)</h3>
+            <p>基础参数: Layers=${layers}, Seq=${seqLen}, Batch=${microBatch}, Hidden=${hiddenSize}</p>
+            <div class="formula mt-1">基准值 (存输入) = L × S × B × H × 2 Bytes = ${(actBytesBase/1e9).toFixed(2)} GB</div>
+        `;
+        
+        if (checkpointing === 'true') {
+             detailLog += `<p class="mt-1 text-green-600">✅ 开启重计算 (Checkpointing): 系数 × 1.0</p>`;
+        } else {
+             detailLog += `<p class="mt-1 text-red-600">❌ 关闭重计算: 系数 × ${checkpointFactor} (存储中间层)</p>`;
+        }
+        
+        if (isMoE && moeFactor !== 1.0) {
+            detailLog += `<p class="mt-1 text-orange-600">⚡ MoE 膨胀修正: 系数 × ${moeFactor} (Router/Padding overhead)</p>`;
+        }
+
+        if (useSP && tp > 1) {
+            finalActBytes = finalActBytes / tp;
+            detailLog += `<p class="mt-1 text-green-600">✅ 开启序列并行 (SP): 激活被 TP=${tp} 稀释</p>`;
+            detailLog += `<div class="formula mt-1">最终激活 = (基准值 × 系数) / TP = ${(finalActBytes/1e9).toFixed(2)} GB</div>`;
+        } else {
+            detailLog += `<div class="formula mt-1">最终激活 = 基准值 × 系数 = ${(finalActBytes/1e9).toFixed(2)} GB</div>`;
+        }
+        detailLog += `</div>`;
+
+        // --- PART 3: Overhead ---
+        // Change from 1024**3 to 1e9 to match the display logic which divides by 1e9
+        let overheadBytes = 2 * 1e9; // 2GB Base (Decimal GB)
+        let overheadDesc = ["基础 CUDA Context: 2.00 GB"];
+        
+        if (tp > 1) { overheadBytes += 0.5 * 1e9; overheadDesc.push(`TP 通信 Buffer: +0.50 GB`); }
+        if (pp > 1) { overheadBytes += 0.5 * 1e9; overheadDesc.push(`PP 通信 Buffer: +0.50 GB`); }
+        if (isMoE) { overheadBytes += 2 * 1e9; overheadDesc.push(`MoE Router/All2All: +2.00 GB`); }
+
+        detailLog += `<div class="step-box border-l-4 border-gray-500">
+            <h3 class="font-bold text-gray-700 mb-2">3. System Overhead (杂项)</h3>
+            <ul class="list-disc pl-5 text-gray-600 text-xs">
+                ${overheadDesc.map(d => `<li>${d}</li>`).join('')}
+            </ul>
+            <div class="formula mt-1">Total Overhead = ${(overheadBytes/1e9).toFixed(2)} GB</div>
+        </div>`;
+
+        // --- Summary ---
+        const toGB = (b) => (b/1e9).toFixed(1);
+        const modelGB = parseFloat(toGB(modelBytes));
+        const actGB = parseFloat(toGB(finalActBytes));
+        const overheadGB = parseFloat(toGB(overheadBytes));
+        const totalGB = parseFloat((modelGB + actGB + overheadGB).toFixed(1));
+
+        document.getElementById('resModel').innerHTML = `${modelGB} <span class="text-sm text-slate-400">GB</span>`;
+        document.getElementById('resAct').innerHTML = `${actGB} <span class="text-sm text-slate-400">GB</span>`;
+        document.getElementById('resTotal').innerHTML = `${totalGB} <span class="text-sm text-slate-400">GB</span>`;
+        document.getElementById('shardInfo').innerText = shardInfoText;
+        document.getElementById('actInfo').innerText = useSP ? `SP Enabled (/${tp})` : `No SP`;
+
+        const statusEl = document.getElementById('resStatus');
+        if (totalGB > gpuVram) {
+            statusEl.className = "inline-block mt-2 px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-600";
+            statusEl.innerText = `OOM (${(totalGB-gpuVram).toFixed(1)} GB)`;
+        } else if (totalGB > gpuVram * 0.85) {
+            statusEl.className = "inline-block mt-2 px-2 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-600";
+            statusEl.innerText = `Tight (${(totalGB/gpuVram*100).toFixed(0)}%)`;
+        } else {
+            statusEl.className = "inline-block mt-2 px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-600";
+            statusEl.innerText = `Safe (${(totalGB/gpuVram*100).toFixed(0)}%)`;
+        }
+
+        let leftHtml = `<ul class="space-y-1 list-disc pl-4">`;
+        leftHtml += `<li><b>并行架构:</b> TP=${tp}, PP=${pp}, DP=${dp}</li>`;
+        leftHtml += `<li><b>ZeRO策略:</b> ${zeroStage === 3 ? 'ZeRO-3 (全切分)' : (zeroStage===2 ? 'ZeRO-2 (切梯度)' : 'DDP')}</li>`;
+        if (zeroStage === 2) leftHtml += `<li><b>ZeRO-2 优化:</b> 权重被 TP/PP 稀释，仅占 ${(physicalModelParams * 2 / 1e9).toFixed(1)} GB。</li>`;
+        leftHtml += `</ul>`;
+
+        let rightHtml = `<ul class="space-y-1 list-disc pl-4">`;
+        if (useSP) rightHtml += `<li class="text-green-600"><b>SP 生效:</b> 激活显存已降低 ${tp} 倍。</li>`;
+        else if (tp > 1) rightHtml += `<li class="text-slate-500">提示: TP已开启，建议开启 SP 以进一步降低激活显存。</li>`;
+        if (totalGB > gpuVram) {
+             if (modelGB > actGB) rightHtml += `<li class="text-red-600"><b>OOM分析:</b> 权重过大。建议增加 TP/PP 或 GPU 数量。</li>`;
+             else rightHtml += `<li class="text-red-600"><b>OOM分析:</b> 激活过大。建议开启 SP 或 减少 Batch。</li>`;
+        }
+        rightHtml += `</ul>`;
+
+        document.getElementById('analysisTextLeft').innerHTML = leftHtml;
+        document.getElementById('analysisTextRight').innerHTML = rightHtml;
+
+        updateChart(modelGB, actGB, overheadGB, gpuVram);
+    }
+
+    function updateChart(model, act, overhead, limit) {
+        const ctx = document.getElementById('memoryChart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+        chartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['显存构成 (GB)'],
+                datasets: [
+                    { label: 'Model States', data: [model], backgroundColor: '#3b82f6' },
+                    { label: 'Activations', data: [act], backgroundColor: '#a855f7' },
+                    { label: 'Overhead', data: [overhead], backgroundColor: '#94a3b8' }
+                ]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { 
+                    x: { stacked: true, max: Math.max(limit * 1.1, model+act+overhead+5) }, 
+                    y: { stacked: true } 
+                },
+                plugins: {
+                    annotation: {
+                        annotations: {
+                            line1: {
+                                type: 'line', xMin: limit, xMax: limit, borderColor: 'red', borderWidth: 2, borderDash: [6, 6],
+                                label: { content: 'VRAM Max', enabled: true, position: 'end', color: 'red' }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    window.onload = function() {
+        applyPreset();
+    }
+</script>
+
+</body>
+</html>
